@@ -10,7 +10,7 @@ const STATUS = {
   connecting: 'Connecting…',
   online: 'Online',
   offline: 'Disconnected',
-  error: "Can't reach the server. Check .env.local, then restart.",
+  error: "Connection problem. Check your Supabase setup.",
 };
 
 function Msg({ m, mine }) {
@@ -37,14 +37,25 @@ export default function Room() {
 
   useEffect(() => { setName(localStorage.getItem('morse-name') || ''); }, []);
 
+  const add = (rows) => setMsgs((m) => {
+    const seen = new Set(m.map((x) => x.id));
+    return [...m, ...rows.filter((r) => !seen.has(r.id)).map((r) => ({ id: r.id, from: r.username, morse: r.morse }))];
+  });
+
   useEffect(() => {
     if (!name) return;
-    const c = supabase.channel('room:' + code);
-    c.on('broadcast', { event: 'msg' }, ({ payload }) => setMsgs((m) => [...m, payload]))
-      .subscribe((s) => setStatus(
-        s === 'SUBSCRIBED' ? 'online' : s === 'CLOSED' ? 'offline' : s === 'CONNECTING' ? 'connecting' : 'error'
+    // live: new rows in this room arrive here
+    const c = supabase.channel('room:' + code)
+      .on('postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages', filter: `room=eq.${code}` },
+        (p) => add([p.new]))
+      .subscribe((st) => setStatus(
+        st === 'SUBSCRIBED' ? 'online' : st === 'CLOSED' ? 'offline' : st === 'CONNECTING' ? 'connecting' : 'error'
       ));
     channel.current = c;
+    // history: load what was already said in this room
+    supabase.from('messages').select('*').eq('room', code).order('created_at').limit(200)
+      .then(({ data, error }) => { if (error) setStatus('error'); else add(data); });
     return () => { supabase.removeChannel(c); };
   }, [name, code]);
 
@@ -53,11 +64,11 @@ export default function Room() {
   const send = async () => {
     const text = draft.trim();
     if (!text) return;
-    const payload = { id: crypto.randomUUID(), from: name, morse: encode(text) };
-    setMsgs((m) => [...m, payload]); // your own message shows up right away
+    const row = { id: crypto.randomUUID(), room: code, username: name, morse: encode(text) };
+    add([row]); // shows instantly; the live copy is ignored because the id matches
     setDraft('');
-    const res = await channel.current?.send({ type: 'broadcast', event: 'msg', payload });
-    if (res !== 'ok') setStatus('error');
+    const { error } = await supabase.from('messages').insert(row);
+    if (error) setStatus('error');
   };
 
   const copy = async () => {
