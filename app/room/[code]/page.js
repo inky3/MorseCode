@@ -6,6 +6,13 @@ import { encode, decode } from '@/lib/morse';
 import MorseKey from '@/components/MorseKey';
 import Guide from '@/components/Guide';
 
+const STATUS = {
+  connecting: 'Connecting…',
+  online: 'Online',
+  offline: 'Disconnected',
+  error: "Can't reach the server. Check .env.local, then restart.",
+};
+
 function Msg({ m, mine }) {
   const [translated, setTranslated] = useState(false);
   return (
@@ -24,6 +31,7 @@ export default function Room() {
   const [draft, setDraft] = useState('');
   const [msgs, setMsgs] = useState([]);
   const [copied, setCopied] = useState(false);
+  const [status, setStatus] = useState('connecting');
   const channel = useRef(null);
   const end = useRef(null);
 
@@ -31,22 +39,25 @@ export default function Room() {
 
   useEffect(() => {
     if (!name) return;
-    const c = supabase.channel('room:' + code, { config: { broadcast: { self: true } } });
-    c.on('broadcast', { event: 'msg' }, ({ payload }) => setMsgs((m) => [...m, payload])).subscribe();
+    const c = supabase.channel('room:' + code);
+    c.on('broadcast', { event: 'msg' }, ({ payload }) => setMsgs((m) => [...m, payload]))
+      .subscribe((s) => setStatus(
+        s === 'SUBSCRIBED' ? 'online' : s === 'CLOSED' ? 'offline' : s === 'CONNECTING' ? 'connecting' : 'error'
+      ));
     channel.current = c;
     return () => { supabase.removeChannel(c); };
   }, [name, code]);
 
   useEffect(() => { end.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs]);
 
-  const send = () => {
+  const send = async () => {
     const text = draft.trim();
     if (!text) return;
-    channel.current.send({
-      type: 'broadcast', event: 'msg',
-      payload: { id: crypto.randomUUID(), from: name, morse: encode(text) },
-    });
+    const payload = { id: crypto.randomUUID(), from: name, morse: encode(text) };
+    setMsgs((m) => [...m, payload]); // your own message shows up right away
     setDraft('');
+    const res = await channel.current?.send({ type: 'broadcast', event: 'msg', payload });
+    if (res !== 'ok') setStatus('error');
   };
 
   const copy = async () => {
@@ -72,15 +83,18 @@ export default function Room() {
     <main>
       <Guide />
       <div className="row">
-        <strong style={{ flex: 2, alignSelf: 'center' }}>Room {code}</strong>
+        <div style={{ flex: 2 }}>
+          <strong>Room {code}</strong><br />
+          <small className={'status ' + status}>{STATUS[status]}</small>
+        </div>
         <button onClick={copy}>{copied ? 'Link copied' : 'Copy link'}</button>
       </div>
       <div className="msgs">
         {msgs.map((m) => <Msg key={m.id} m={m} mine={m.from === name} />)}
         <div ref={end} />
       </div>
-      <div className="box">{draft || 'Tap the key to write…'}</div>
-      <div className="row">
+      <div className="composer">
+        <div className="box">{draft || <span className="ph">Your message appears here</span>}</div>
         <button onClick={() => setDraft((d) => d.slice(0, -1))}>Delete</button>
         <button className="big" onClick={send}>Send</button>
       </div>
