@@ -6,13 +6,6 @@ import { encode, decode } from '@/lib/morse';
 import MorseKey from '@/components/MorseKey';
 import Guide from '@/components/Guide';
 
-const STATUS = {
-  connecting: 'Connecting…',
-  online: 'Online',
-  offline: 'Disconnected',
-  error: "Connection problem. Check your Supabase setup.",
-};
-
 function Msg({ m, mine }) {
   const [translated, setTranslated] = useState(false);
   return (
@@ -31,32 +24,34 @@ export default function Room() {
   const [draft, setDraft] = useState('');
   const [msgs, setMsgs] = useState([]);
   const [copied, setCopied] = useState(false);
-  const [status, setStatus] = useState('connecting');
-  const channel = useRef(null);
+  const [live, setLive] = useState(false); // instant updates connected
+  const [dbOk, setDbOk] = useState(null); // true / false once the database answers
+  const [detail, setDetail] = useState('');
   const end = useRef(null);
-
-  useEffect(() => { setName(localStorage.getItem('morse-name') || ''); }, []);
 
   const add = (rows) => setMsgs((m) => {
     const seen = new Set(m.map((x) => x.id));
     return [...m, ...rows.filter((r) => !seen.has(r.id)).map((r) => ({ id: r.id, from: r.username, morse: r.morse }))];
   });
 
+  const load = async () => {
+    const { data, error } = await supabase.from('messages').select('*').eq('room', code).order('created_at').limit(200);
+    if (error) { setDbOk(false); setDetail('Loading messages: ' + error.message); }
+    else { setDbOk(true); setDetail(''); add(data); }
+  };
+
+  useEffect(() => { setName(localStorage.getItem('morse-name') || ''); }, []);
+
   useEffect(() => {
     if (!name) return;
-    // live: new rows in this room arrive here
+    load();
+    const poll = setInterval(load, 3000); // backup: works even if instant updates are blocked
     const c = supabase.channel('room:' + code)
       .on('postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `room=eq.${code}` },
         (p) => add([p.new]))
-      .subscribe((st) => setStatus(
-        st === 'SUBSCRIBED' ? 'online' : st === 'CLOSED' ? 'offline' : st === 'CONNECTING' ? 'connecting' : 'error'
-      ));
-    channel.current = c;
-    // history: load what was already said in this room
-    supabase.from('messages').select('*').eq('room', code).order('created_at').limit(200)
-      .then(({ data, error }) => { if (error) setStatus('error'); else add(data); });
-    return () => { supabase.removeChannel(c); };
+      .subscribe((st) => setLive(st === 'SUBSCRIBED'));
+    return () => { clearInterval(poll); supabase.removeChannel(c); };
   }, [name, code]);
 
   useEffect(() => { end.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs]);
@@ -65,10 +60,10 @@ export default function Room() {
     const text = draft.trim();
     if (!text) return;
     const row = { id: crypto.randomUUID(), room: code, username: name, morse: encode(text) };
-    add([row]); // shows instantly; the live copy is ignored because the id matches
+    add([row]); // shows instantly; the saved copy is ignored because the id matches
     setDraft('');
     const { error } = await supabase.from('messages').insert(row);
-    if (error) setStatus('error');
+    if (error) { setDbOk(false); setDetail('Sending: ' + error.message); }
   };
 
   const copy = async () => {
@@ -90,13 +85,17 @@ export default function Room() {
     );
   }
 
+  const label = dbOk === false ? "Can't reach the database. Check your Supabase setup."
+    : live ? 'Online' : dbOk ? 'Online (updates every few seconds)' : 'Connecting…';
+
   return (
     <main>
       <Guide />
       <div className="row">
         <div style={{ flex: 2 }}>
           <strong>Room {code}</strong><br />
-          <small className={'status ' + status}>{STATUS[status]}</small>
+          <small className={'status ' + (dbOk === false ? 'error' : dbOk ? 'online' : 'connecting')}>{label}</small>
+          {dbOk === false && detail && <><br /><small className="status error">{detail}</small></>}
         </div>
         <button onClick={copy}>{copied ? 'Link copied' : 'Copy link'}</button>
       </div>
